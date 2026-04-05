@@ -47,6 +47,7 @@ class HyperliquidAPI:
                 configuration.
         """
         self._meta_cache = None
+        self._hip3_meta_cache = {}  # {dex_name: meta_response}
         if "hyperliquid_private_key" in CONFIG and CONFIG["hyperliquid_private_key"]:
             self.wallet = Account.from_key(CONFIG["hyperliquid_private_key"])
         elif "mnemonic" in CONFIG and CONFIG["mnemonic"]:
@@ -139,6 +140,7 @@ class HyperliquidAPI:
         Returns:
             The input ``amount`` rounded to the market's ``szDecimals`` precision.
         """
+        # Check main dex cache first
         meta = self._meta_cache[0] if hasattr(self, '_meta_cache') and self._meta_cache else None
         if meta:
             universe = meta.get("universe", [])
@@ -146,6 +148,16 @@ class HyperliquidAPI:
             if asset_info:
                 decimals = asset_info.get("szDecimals", 8)
                 return round(amount, decimals)
+        # Check HIP-3 dex cache
+        if ":" in asset:
+            dex = asset.split(":")[0]
+            dex_meta = self._hip3_meta_cache.get(dex) if hasattr(self, '_hip3_meta_cache') else None
+            if dex_meta:
+                universe = dex_meta.get("universe", [])
+                asset_info = next((u for u in universe if u.get("name") == asset), None)
+                if asset_info:
+                    decimals = asset_info.get("szDecimals", 8)
+                    return round(amount, decimals)
         return round(amount, 8)
 
     async def place_buy_order(self, asset, amount, slippage=0.01):
@@ -386,22 +398,45 @@ class HyperliquidAPI:
     async def get_current_price(self, asset):
         """Return the latest mid-price for ``asset``.
 
+        Supports both main dex assets (e.g. "BTC") and HIP-3 assets
+        (e.g. "xyz:GOLD"). For HIP-3 assets, queries the dex-specific
+        allMids endpoint.
+
         Args:
             asset: Market symbol to query.
 
         Returns:
             Mid-price as a float, or ``0.0`` when unavailable.
         """
-        mids = await self._retry(self.info.all_mids)
+        if ":" in asset:
+            # HIP-3 asset — need dex-specific allMids
+            dex = asset.split(":")[0]
+            mids = await self._retry(
+                lambda: self.info.post("/info", {"type": "allMids", "dex": dex})
+            )
+        else:
+            mids = await self._retry(self.info.all_mids)
         return float(mids.get(asset, 0.0))
 
-    async def get_meta_and_ctxs(self):
+    async def get_meta_and_ctxs(self, dex=None):
         """Return cached meta/context information, fetching once per lifecycle.
 
+        Args:
+            dex: Optional HIP-3 dex name (e.g. "xyz"). None for main dex.
+
         Returns:
-            Cached metadata response as returned by
-            :meth:`Info.meta_and_asset_ctxs`.
+            Cached metadata response.
         """
+        if dex:
+            if dex not in self._hip3_meta_cache:
+                response = await self._retry(
+                    lambda: self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex})
+                )
+                if isinstance(response, list) and len(response) >= 2:
+                    self._hip3_meta_cache[dex] = response
+                    # Also cache the meta separately for round_size
+                    # Store as {dex: {"universe": [...]}}
+            return self._hip3_meta_cache.get(dex)
         if not self._meta_cache:
             response = await self._retry(self.info.meta_and_asset_ctxs)
             self._meta_cache = response
@@ -411,13 +446,14 @@ class HyperliquidAPI:
         """Return open interest for ``asset`` if it exists in cached metadata.
 
         Args:
-            asset: Market symbol to query.
+            asset: Market symbol to query (supports HIP-3 "dex:asset" format).
 
         Returns:
             Rounded open interest or ``None`` if unavailable.
         """
         try:
-            data = await self.get_meta_and_ctxs()
+            dex = asset.split(":")[0] if ":" in asset else None
+            data = await self.get_meta_and_ctxs(dex=dex)
             if isinstance(data, list) and len(data) >= 2:
                 meta, asset_ctxs = data[0], data[1]
                 universe = meta.get("universe", [])
@@ -454,9 +490,20 @@ class HyperliquidAPI:
         end_time = int(_time.time() * 1000)
         start_time = end_time - (count * interval_ms)
 
-        raw = await self._retry(
-            lambda: self.info.candles_snapshot(asset, interval, start_time, end_time)
-        )
+        if ":" in asset:
+            # HIP-3 asset — SDK candles_snapshot can't resolve dex:asset names,
+            # so use the raw post endpoint directly
+            raw = await self._retry(
+                lambda: self.info.post("/info", {
+                    "type": "candleSnapshot",
+                    "req": {"coin": asset, "interval": interval,
+                            "startTime": start_time, "endTime": end_time}
+                })
+            )
+        else:
+            raw = await self._retry(
+                lambda: self.info.candles_snapshot(asset, interval, start_time, end_time)
+            )
         candles = []
         for c in raw:
             candles.append({
@@ -479,7 +526,8 @@ class HyperliquidAPI:
             Funding rate as a float or ``None`` when not present.
         """
         try:
-            data = await self.get_meta_and_ctxs()
+            dex = asset.split(":")[0] if ":" in asset else None
+            data = await self.get_meta_and_ctxs(dex=dex)
             if isinstance(data, list) and len(data) >= 2:
                 meta, asset_ctxs = data[0], data[1]
                 universe = meta.get("universe", [])
