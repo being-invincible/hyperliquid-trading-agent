@@ -151,8 +151,9 @@ class HyperliquidAPI:
         # Check HIP-3 dex cache
         if ":" in asset:
             dex = asset.split(":")[0]
-            dex_meta = self._hip3_meta_cache.get(dex) if hasattr(self, '_hip3_meta_cache') else None
-            if dex_meta:
+            dex_data = self._hip3_meta_cache.get(dex) if hasattr(self, '_hip3_meta_cache') else None
+            if dex_data and isinstance(dex_data, list) and len(dex_data) >= 1:
+                dex_meta = dex_data[0]  # [meta_dict, asset_ctxs_list]
                 universe = dex_meta.get("universe", [])
                 asset_info = next((u for u in universe if u.get("name") == asset), None)
                 if asset_info:
