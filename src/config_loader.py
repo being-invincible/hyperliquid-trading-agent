@@ -78,7 +78,7 @@ CONFIG = {
 
     # LLM — Anthropic Claude API (primary)
     "anthropic_api_key": _get_env("ANTHROPIC_API_KEY", required=True),
-    "llm_model": _get_env("LLM_MODEL", "claude-sonnet-4-20250514"),
+    "llm_model": _get_env("LLM_MODEL", "claude-sonnet-4-6"),
     "sanitize_model": _get_env("SANITIZE_MODEL", "claude-haiku-4-5-20251001"),
     "max_tokens": _get_int("MAX_TOKENS", 4096),
     "enable_tool_calling": _get_bool("ENABLE_TOOL_CALLING", False),
@@ -100,6 +100,13 @@ CONFIG = {
     "mandatory_sl_pct": _get_env("MANDATORY_SL_PCT", "5"),
     "max_concurrent_positions": _get_env("MAX_CONCURRENT_POSITIONS", "10"),
     "min_balance_reserve_pct": _get_env("MIN_BALANCE_RESERVE_PCT", "10"),
+
+    # Email alerting
+    "alert_email_from": _get_env("ALERT_EMAIL_FROM"),
+    "alert_email_to": _get_env("ALERT_EMAIL_TO"),
+    "alert_email_password": _get_env("ALERT_EMAIL_PASSWORD"),
+    "alert_smtp_host": _get_env("ALERT_SMTP_HOST", "smtp.gmail.com"),
+    "alert_smtp_port": _get_env("ALERT_SMTP_PORT", "587"),
 
     # API server
     "api_host": _get_env("API_HOST", "0.0.0.0"),

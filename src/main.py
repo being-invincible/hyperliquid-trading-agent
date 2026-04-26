@@ -16,9 +16,11 @@ import math  # For Sharpe
 from dotenv import load_dotenv
 import os
 import json
+import time
 from aiohttp import web
 from src.utils.formatting import format_number as fmt, format_size as fmt_sz
 from src.utils.prompt_utils import json_default, round_or_none, round_series
+from src.notifications.emailer import Emailer
 
 load_dotenv()
 
@@ -68,6 +70,7 @@ def main():
     hyperliquid = HyperliquidAPI()
     agent = TradingAgent(hyperliquid=hyperliquid)
     risk_mgr = RiskManager()
+    emailer = Emailer()
 
 
     start_time = datetime.now(timezone.utc)
@@ -107,7 +110,15 @@ def main():
 
             # Global account state
             state = await hyperliquid.get_user_state()
-            total_value = state.get('total_value') or state['balance'] + sum(p.get('pnl', 0) for p in state['positions'])
+            emailer.maybe_send_digest(
+                balance=float(state.get('balance', 0)),
+                daily_return_pct=total_return_pct if invocation_count > 1 else 0.0,
+                open_positions=len([p for p in state.get('positions', []) if abs(float(p.get('szi') or 0)) > 0]),
+            )
+            balance = state.get('balance', 0.0)
+            if balance == 0.0:
+                logging.warning("Account balance is 0 — API response may be incomplete")
+            total_value = state.get('total_value') or balance + sum(p.get('pnl', 0) for p in state.get('positions', []))
             sharpe = calculate_sharpe(trade_log)
 
             account_value = total_value
@@ -138,6 +149,12 @@ def main():
                     size = ptc["size"]
                     is_long = ptc["is_long"]
                     add_event(f"RISK FORCE-CLOSE: {coin} at {ptc['loss_pct']}% loss (PnL: ${ptc['pnl']})")
+                    emailer.send_alert(
+                        f"Force-close: {coin} -{ptc['loss_pct']}%",
+                        f"Asset: {coin}\nLoss: {ptc['loss_pct']}%\nPnL: ${ptc['pnl']}\n"
+                        f"Balance: ${round_or_none(state.get('balance', 0), 2)}\n"
+                        f"Time: {datetime.now(timezone.utc).isoformat()}"
+                    )
                     try:
                         if is_long:
                             await hyperliquid.place_sell_order(coin, size)
@@ -265,22 +282,36 @@ def main():
                 "recent_fills": recent_fills_struct,
             }
 
-            # Gather data for ALL assets first (using Hyperliquid candles + local indicators)
+            # Gather data for ALL assets concurrently — price, OI, funding, and
+            # both candle timeframes are fetched in parallel per asset, and all
+            # assets are fetched simultaneously.
+            async def _fetch_asset_data(asset):
+                current_price, oi, funding, candles_5m, candles_4h = await asyncio.gather(
+                    hyperliquid.get_current_price(asset),
+                    hyperliquid.get_open_interest(asset),
+                    hyperliquid.get_funding_rate(asset),
+                    hyperliquid.get_candles(asset, "5m", 100),
+                    hyperliquid.get_candles(asset, "4h", 100),
+                )
+                return asset, current_price, oi, funding, candles_5m, candles_4h
+
+            raw_results = await asyncio.gather(
+                *[_fetch_asset_data(a) for a in args.assets],
+                return_exceptions=True
+            )
+
             market_sections = []
             asset_prices = {}
-            for asset in args.assets:
+            for result in raw_results:
+                if isinstance(result, Exception):
+                    add_event(f"Data gather error: {result}")
+                    continue
                 try:
-                    current_price = await hyperliquid.get_current_price(asset)
+                    asset, current_price, oi, funding, candles_5m, candles_4h = result
                     asset_prices[asset] = current_price
                     if asset not in price_history:
                         price_history[asset] = deque(maxlen=60)
                     price_history[asset].append({"t": datetime.now(timezone.utc).isoformat(), "mid": round_or_none(current_price, 2)})
-                    oi = await hyperliquid.get_open_interest(asset)
-                    funding = await hyperliquid.get_funding_rate(asset)
-
-                    # Fetch candles from Hyperliquid and compute indicators locally
-                    candles_5m = await hyperliquid.get_candles(asset, "5m", 100)
-                    candles_4h = await hyperliquid.get_candles(asset, "4h", 100)
 
                     intra = compute_all(candles_5m)
                     lt = compute_all(candles_4h)
@@ -317,7 +348,7 @@ def main():
                         "recent_mid_prices": recent_mids,
                     })
                 except Exception as e:
-                    add_event(f"Data gather error {asset}: {e}")
+                    add_event(f"Data process error {result[0] if result else '?'}: {e}")
                     continue
 
             # Single LLM call with all assets
@@ -335,10 +366,11 @@ def main():
                     "requirement": "Decide actions for all assets and return a strict JSON object matching the schema."
                 })
             ])
-            context = json.dumps(context_payload, default=json_default)
+            context = json.dumps(context_payload, sort_keys=True, default=json_default)
             add_event(f"Combined prompt length: {len(context)} chars for {len(args.assets)} assets")
-            with open("prompts.log", "a") as f:
-                f.write(f"\n\n--- {datetime.now()} - ALL ASSETS ---\n{json.dumps(context_payload, indent=2, default=json_default)}\n")
+            if os.getenv("LOG_FULL_PROMPT", "false").lower() == "true":
+                with open("prompts.log", "a") as f:
+                    f.write(f"\n\n--- {datetime.now()} - ALL ASSETS ---\n{json.dumps(context_payload, indent=2, sort_keys=True, default=json_default)}\n")
 
             def _is_failed_outputs(outs):
                 """Return True when outputs are missing or clearly invalid."""
@@ -375,7 +407,7 @@ def main():
                     ("retry_instruction", "Return ONLY the JSON array per schema with no prose."),
                     ("original_context", context_payload)
                 ])
-                context_retry = json.dumps(context_retry_payload, default=json_default)
+                context_retry = json.dumps(context_retry_payload, sort_keys=True, default=json_default)
                 try:
                     outputs = agent.decide_trade(args.assets, context_retry)
                     if not isinstance(outputs, dict):
@@ -421,9 +453,8 @@ def main():
                     asset = output.get("asset")
                     if not asset or asset not in args.assets:
                         continue
-                    action = output.get("action")
+                    action = output.get("action", "hold")
                     current_price = asset_prices.get(asset, 0)
-                    action = output["action"]
                     rationale = output.get("rationale", "")
                     if rationale:
                         add_event(f"Decision rationale for {asset}: {rationale}")
@@ -441,6 +472,13 @@ def main():
                         )
                         if not allowed:
                             add_event(f"RISK BLOCKED {asset}: {reason}")
+                            if "circuit breaker" in reason.lower():
+                                emailer.send_alert(
+                                    "Circuit breaker active — trading halted",
+                                    f"Reason: {reason}\n"
+                                    f"Balance: ${round_or_none(state.get('balance', 0), 2)}\n"
+                                    f"Time: {datetime.now(timezone.utc).isoformat()}"
+                                )
                             with open(diary_path, "a") as f:
                                 f.write(json.dumps({
                                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -468,13 +506,18 @@ def main():
                         else:
                             order = await hyperliquid.place_buy_order(asset, amount) if is_buy else await hyperliquid.place_sell_order(asset, amount)
 
-                        # Confirm by checking recent fills for this asset shortly after placing
+                        # Confirm by checking recent fills for this asset shortly after placing.
+                        # Use a 30-second timestamp window to avoid false positives from
+                        # older fills on the same coin (e.g. stale SL/TP fills).
                         await asyncio.sleep(1)
                         fills_check = await hyperliquid.get_recent_fills(limit=10)
+                        cutoff_ms = (time.time() - 30) * 1000
                         filled = False
                         for fc in reversed(fills_check):
                             try:
-                                if (fc.get('coin') == asset or fc.get('asset') == asset):
+                                fill_time = int(fc.get('time') or fc.get('timestamp') or 0)
+                                coin_match = (fc.get('coin') == asset or fc.get('asset') == asset)
+                                if coin_match and fill_time > cutoff_ms:
                                     filled = True
                                     break
                             except Exception:
@@ -510,6 +553,7 @@ def main():
                             "opened_at": datetime.now().isoformat()
                         })
                         add_event(f"{action.upper()} {asset} amount {amount:.4f} at ~{current_price}")
+                        emailer.record_trade()
                         if rationale:
                             add_event(f"Post-trade rationale for {asset}: {rationale}")
                         # Write to diary after confirming fills status

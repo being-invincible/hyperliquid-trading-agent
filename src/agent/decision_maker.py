@@ -138,7 +138,16 @@ class TradingAgent:
             kwargs = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
-                "system": system_prompt,
+                # Pass system prompt as a content block so Anthropic can cache it.
+                # The static ~2,100-token prompt is reused across calls — caching
+                # cuts input token cost by ~90% on cache hits (5-min TTL).
+                "system": [
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 "messages": msgs,
             }
             if use_tools and enable_tools:
@@ -170,10 +179,17 @@ class TradingAgent:
                 indicator = tool_input["indicator"]
 
                 # Fetch candles from Hyperliquid
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                # asyncio.run() cannot be called from a running event loop,
+                # so offload to a fresh thread that owns its own loop.
+                import concurrent.futures
+                try:
+                    asyncio.get_running_loop()
+                    in_async = True
+                except RuntimeError:
+                    in_async = False
+
+                if in_async:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                         candles = pool.submit(
                             asyncio.run,
                             self.hyperliquid.get_candles(asset, interval, 100)
