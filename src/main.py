@@ -107,7 +107,10 @@ def main():
 
             # Global account state
             state = await hyperliquid.get_user_state()
-            total_value = state.get('total_value') or state['balance'] + sum(p.get('pnl', 0) for p in state['positions'])
+            balance = state.get('balance', 0.0)
+            if balance == 0.0:
+                logging.warning("Account balance is 0 — API response may be incomplete")
+            total_value = state.get('total_value') or balance + sum(p.get('pnl', 0) for p in state.get('positions', []))
             sharpe = calculate_sharpe(trade_log)
 
             account_value = total_value
@@ -421,9 +424,8 @@ def main():
                     asset = output.get("asset")
                     if not asset or asset not in args.assets:
                         continue
-                    action = output.get("action")
+                    action = output.get("action", "hold")
                     current_price = asset_prices.get(asset, 0)
-                    action = output["action"]
                     rationale = output.get("rationale", "")
                     if rationale:
                         add_event(f"Decision rationale for {asset}: {rationale}")
