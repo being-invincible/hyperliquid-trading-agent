@@ -339,10 +339,11 @@ def main():
                     "requirement": "Decide actions for all assets and return a strict JSON object matching the schema."
                 })
             ])
-            context = json.dumps(context_payload, default=json_default)
+            context = json.dumps(context_payload, sort_keys=True, default=json_default)
             add_event(f"Combined prompt length: {len(context)} chars for {len(args.assets)} assets")
-            with open("prompts.log", "a") as f:
-                f.write(f"\n\n--- {datetime.now()} - ALL ASSETS ---\n{json.dumps(context_payload, indent=2, default=json_default)}\n")
+            if os.getenv("LOG_FULL_PROMPT", "false").lower() == "true":
+                with open("prompts.log", "a") as f:
+                    f.write(f"\n\n--- {datetime.now()} - ALL ASSETS ---\n{json.dumps(context_payload, indent=2, sort_keys=True, default=json_default)}\n")
 
             def _is_failed_outputs(outs):
                 """Return True when outputs are missing or clearly invalid."""
@@ -379,7 +380,7 @@ def main():
                     ("retry_instruction", "Return ONLY the JSON array per schema with no prose."),
                     ("original_context", context_payload)
                 ])
-                context_retry = json.dumps(context_retry_payload, default=json_default)
+                context_retry = json.dumps(context_retry_payload, sort_keys=True, default=json_default)
                 try:
                     outputs = agent.decide_trade(args.assets, context_retry)
                     if not isinstance(outputs, dict):
