@@ -138,7 +138,16 @@ class TradingAgent:
             kwargs = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
-                "system": system_prompt,
+                # Pass system prompt as a content block so Anthropic can cache it.
+                # The static ~2,100-token prompt is reused across calls — caching
+                # cuts input token cost by ~90% on cache hits (5-min TTL).
+                "system": [
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 "messages": msgs,
             }
             if use_tools and enable_tools:
