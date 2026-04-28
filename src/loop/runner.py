@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from src.indicators.local_indicators import compute_all, last_n, latest
 from src.loop.dashboard import build_dashboard
 from src.loop.executor import execute_trades
+from src.loop.learning import load_recent_outcomes
 from src.loop.reconciler import fetch_fills, reconcile_active_trades
 from src.loop.state_builder import build_account_state
 from src.utils.prompt_utils import json_default, round_or_none, round_series
@@ -229,6 +230,7 @@ async def run_loop(
                 logging.info(f"Data process error {result[0] if result else '?'}: {e}")
                 continue
 
+        recent_outcomes = load_recent_outcomes(diary_path)
         context_payload = OrderedDict([
             ("invocation", {
                 "minutes_since_start": round(minutes_since_start, 2),
@@ -237,6 +239,7 @@ async def run_loop(
             }),
             ("account", dashboard),
             ("risk_limits", risk_mgr.get_risk_summary()),
+            ("recent_trade_outcomes", recent_outcomes),
             ("market_data", market_sections),
             ("instructions", {
                 "assets": assets,
