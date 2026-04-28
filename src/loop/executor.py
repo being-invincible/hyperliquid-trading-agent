@@ -7,6 +7,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 
+from src.intelligence.kelly import kelly_size_usd
 from src.utils.prompt_utils import round_or_none
 
 
@@ -69,6 +70,15 @@ async def execute_trades(
                     continue
 
                 alloc_usd = float(output.get("allocation_usd", alloc_usd))
+
+                # Replace LLM size with Kelly sizing when enough history exists
+                balance = float(state.get("balance", 0))
+                max_pos_usd = balance * (risk_mgr.max_position_pct / 100.0)
+                kelly_usd = kelly_size_usd(diary_path, balance, max_pos_usd)
+                if kelly_usd is not None and kelly_usd > 0:
+                    logging.info(f"Kelly sizing {asset}: ${kelly_usd:.2f} (was ${alloc_usd:.2f})")
+                    alloc_usd = kelly_usd
+
                 amount = alloc_usd / current_price
 
                 order_type = output.get("order_type", "market")
