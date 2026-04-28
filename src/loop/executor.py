@@ -46,6 +46,11 @@ async def execute_trades(
                     logging.info(f"Holding {asset}: zero/negative allocation")
                     continue
 
+                # C7: reject assets whose price fetch failed during data-gather
+                if not current_price or current_price <= 0:
+                    logging.info(f"Skipping {asset}: price unavailable from data-gather")
+                    continue
+
                 output["current_price"] = current_price
                 allowed, reason, output = risk_mgr.validate_trade(
                     output, state, initial_account_value or 0
@@ -80,6 +85,21 @@ async def execute_trades(
                         logging.info(f"Kelly cap {asset}: ${alloc_usd:.2f} → ${kelly_usd:.2f}")
                         alloc_usd = kelly_usd
 
+                # C6: re-fetch price immediately before sizing (LLM latency can be 30–120s)
+                try:
+                    fresh_price = await hyperliquid.get_current_price(asset)
+                    if fresh_price and fresh_price > 0:
+                        if abs(fresh_price - current_price) / current_price > 0.05:
+                            logging.warning(f"Price moved >5% during LLM call for {asset}: "
+                                            f"${current_price:.2f} → ${fresh_price:.2f}")
+                        current_price = fresh_price
+                    else:
+                        logging.warning(f"Skipping {asset}: fresh price fetch returned 0")
+                        continue
+                except Exception as e:
+                    logging.warning(f"Skipping {asset}: fresh price fetch failed — {e}")
+                    continue
+
                 amount = alloc_usd / current_price
 
                 order_type = output.get("order_type", "market")
@@ -98,17 +118,19 @@ async def execute_trades(
                     else:
                         order = await hyperliquid.place_sell_order(asset, amount)
 
-                # Confirm fill within 30-second window (skipped in simulation)
+                # H2: record time just before order so fill confirmation is order-specific
+                order_ts_ms = time.time() * 1000
+
+                # Confirm fill using order placement timestamp (H2 fix)
                 if not getattr(hyperliquid, 'is_simulation', False):
                     await asyncio.sleep(1)
                 fills_check = await hyperliquid.get_recent_fills(limit=10)
-                cutoff_ms = (time.time() - 30) * 1000
                 filled = False
                 for fc in reversed(fills_check):
                     try:
                         fill_time = int(fc.get('time') or fc.get('timestamp') or 0)
                         coin_match = (fc.get('coin') == asset or fc.get('asset') == asset)
-                        if coin_match and fill_time > cutoff_ms:
+                        if coin_match and fill_time >= order_ts_ms:
                             filled = True
                             break
                     except Exception:
@@ -121,6 +143,28 @@ async def execute_trades(
                     "exit_plan": output.get("exit_plan", ""),
                     "filled": filled,
                 })
+
+                # H5: write diary entry immediately after entry order — before TP/SL placement
+                opened_at = datetime.now(timezone.utc).isoformat()
+                with open(diary_path, "a") as f:
+                    f.write(json.dumps({
+                        "timestamp": opened_at,
+                        "asset": asset,
+                        "action": action,
+                        "is_long": is_buy,
+                        "order_type": order_type,
+                        "limit_price": limit_price,
+                        "allocation_usd": alloc_usd,
+                        "amount": amount,
+                        "entry_price": current_price,
+                        "tp_price": output.get("tp_price"),
+                        "sl_price": output.get("sl_price"),
+                        "exit_plan": output.get("exit_plan", ""),
+                        "rationale": output.get("rationale", ""),
+                        "order_result": str(order),
+                        "opened_at": opened_at,
+                        "filled": filled,
+                    }) + "\n")
 
                 tp_oid = None
                 sl_oid = None
@@ -149,34 +193,12 @@ async def execute_trades(
                     "tp_oid": tp_oid,
                     "sl_oid": sl_oid,
                     "exit_plan": output.get("exit_plan", ""),
-                    "opened_at": datetime.now(timezone.utc).isoformat(),
+                    "opened_at": opened_at,
                 })
                 logging.info(f"{action.upper()} {asset} amount {amount:.4f} at ~{current_price}")
                 emailer.record_trade()
                 if rationale:
                     logging.info(f"Post-trade rationale for {asset}: {rationale}")
-
-                with open(diary_path, "a") as f:
-                    f.write(json.dumps({
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "asset": asset,
-                        "action": action,
-                        "is_long": is_buy,
-                        "order_type": order_type,
-                        "limit_price": limit_price,
-                        "allocation_usd": alloc_usd,
-                        "amount": amount,
-                        "entry_price": current_price,
-                        "tp_price": output.get("tp_price"),
-                        "tp_oid": tp_oid,
-                        "sl_price": output.get("sl_price"),
-                        "sl_oid": sl_oid,
-                        "exit_plan": output.get("exit_plan", ""),
-                        "rationale": output.get("rationale", ""),
-                        "order_result": str(order),
-                        "opened_at": datetime.now(timezone.utc).isoformat(),
-                        "filled": filled,
-                    }) + "\n")
 
             else:
                 logging.info(f"Hold {asset}: {output.get('rationale', '')}")

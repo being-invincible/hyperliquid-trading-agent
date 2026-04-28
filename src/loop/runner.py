@@ -65,6 +65,7 @@ async def run_loop(
     initial_account_value: float | None = None
     total_return_pct: float = 0.0
     price_history: dict = {}
+    _force_close_attempted: set = set()  # H4: prevent double-close on slow fills
 
     _p = Path(diary_path)
     db_path = str(_p.with_name(_p.stem.replace("diary", "state") + ".db"))
@@ -118,11 +119,17 @@ async def run_loop(
 
         # Force-close positions exceeding max loss
         try:
+            live_coins = {p.get('coin') for p in state.get('positions', [])
+                          if abs(float(p.get('szi') or 0)) > 0}
+            _force_close_attempted -= _force_close_attempted - live_coins  # clear closed assets
             positions_to_close = risk_mgr.check_losing_positions(state.get('positions', []))
             for ptc in positions_to_close:
                 coin = ptc["coin"]
                 size = ptc["size"]
                 is_long = ptc["is_long"]
+                if coin in _force_close_attempted:  # H4: skip if already sent this session
+                    logging.info(f"RISK: skipping duplicate force-close for {coin} (already attempted)")
+                    continue
                 logging.info(f"RISK FORCE-CLOSE: {coin} at {ptc['loss_pct']}% loss (PnL: ${ptc['pnl']})")
                 emailer.send_alert(
                     f"Force-close: {coin} -{ptc['loss_pct']}%",
@@ -131,11 +138,9 @@ async def run_loop(
                     f"Time: {datetime.now(timezone.utc).isoformat()}"
                 )
                 try:
-                    if is_long:
-                        await hyperliquid.place_sell_order(coin, size)
-                    else:
-                        await hyperliquid.place_buy_order(coin, size)
                     await hyperliquid.cancel_all_orders(coin)
+                    await hyperliquid.place_close_order(coin, is_long, size)  # C3: reduce-only
+                    _force_close_attempted.add(coin)  # H4: prevent next-cycle duplicate
                     for tr in active_trades[:]:
                         if tr.get('asset') == coin:
                             active_trades.remove(tr)

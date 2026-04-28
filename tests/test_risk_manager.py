@@ -76,17 +76,17 @@ class TestCheckConcurrentPositions:
 
 class TestCheckBalanceReserve:
     def test_balance_above_reserve(self, rm):
-        # min_balance_reserve_pct=10 → min = 100 on 1000 initial
-        ok, _ = rm.check_balance_reserve(balance=900, initial_balance=1000)
+        # min_balance_reserve_pct=10 → min = 100 on 1000 initial account value
+        ok, _ = rm.check_balance_reserve(account_value=900, initial_account_value=1000)
         assert ok is True
 
     def test_balance_below_reserve(self, rm):
-        ok, reason = rm.check_balance_reserve(balance=50, initial_balance=1000)
+        ok, reason = rm.check_balance_reserve(account_value=50, initial_account_value=1000)
         assert ok is False
         assert "reserve" in reason.lower()
 
     def test_zero_initial_balance_skips_check(self, rm):
-        ok, _ = rm.check_balance_reserve(balance=0, initial_balance=0)
+        ok, _ = rm.check_balance_reserve(account_value=0, initial_account_value=0)
         assert ok is True
 
 
