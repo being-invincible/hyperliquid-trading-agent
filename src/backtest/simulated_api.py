@@ -142,7 +142,9 @@ class SimulatedAPI:
                 new_szi = max(0.0, pos["szi"] - amount)
                 self._positions[asset] = {**pos, "szi": new_szi, "pnl": 0 if new_szi == 0 else pos["pnl"]}
             else:
-                self._balance += cost
+                import logging
+                logging.warning("SimulatedAPI: sell on %s with no position — rejected", asset)
+                return {"status": "rejected", "reason": "no_position"}
 
         fill = {
             "coin": asset,
