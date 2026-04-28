@@ -103,7 +103,13 @@ async def run_loop(
             open_positions=len([p for p in state.get('positions', []) if abs(float(p.get('szi') or 0)) > 0]),
         )
 
-        balance, total_value, positions = await build_account_state(state, hyperliquid)
+        try:
+            balance, total_value, positions = await build_account_state(state, hyperliquid)
+        except Exception as e:
+            logging.warning(f"build_account_state failed: {e} — using raw state values")
+            balance = float(state.get('balance', 0))
+            total_value = float(state.get('total_value', balance))
+            positions = []
         account_value = total_value
         if initial_account_value is None:
             initial_account_value = account_value
